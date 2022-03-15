@@ -30,7 +30,7 @@ use aptos_types::{
     proof::{position::Position, EventAccumulatorProof, EventProof},
     transaction::Version,
 };
-use schemadb::{schema::ValueCodec, ReadOptions, SchemaIterator, DB};
+use schemadb::{schema::ValueCodec, ReadOptions, SchemaBatch, SchemaIterator, DB};
 use std::{
     convert::{TryFrom, TryInto},
     iter::Peekable,
@@ -119,7 +119,7 @@ impl EventStore {
         Ok((event, proof))
     }
 
-    fn get_txn_ver_by_seq_num(&self, event_key: &EventKey, seq_num: u64) -> Result<u64> {
+    pub fn get_txn_ver_by_seq_num(&self, event_key: &EventKey, seq_num: u64) -> Result<u64> {
         let (ver, _) = self
             .db
             .get::<EventByKeySchema>(&(*event_key, seq_num))?
@@ -127,7 +127,7 @@ impl EventStore {
         Ok(ver)
     }
 
-    fn get_event_by_key(
+    pub fn get_event_by_key(
         &self,
         event_key: &EventKey,
         seq_num: u64,
@@ -359,6 +359,64 @@ impl EventStore {
         version
             .checked_sub(1)
             .ok_or_else(|| format_err!("A block with non-zero seq num started at version 0."))
+    }
+
+    /// Prunes the events by key store for a set of events
+    pub fn prune_events_by_key(
+        &self,
+        events: Vec<&ContractEvent>,
+        db_batch: &mut SchemaBatch,
+    ) -> anyhow::Result<()> {
+        for event in events {
+            db_batch.delete::<EventByKeySchema>(&(*event.key(), event.sequence_number()))?;
+        }
+        Ok(())
+    }
+
+    /// Prunes events by accumulator store for a range of version in [begin, end)
+    pub fn prune_event_accumulator(
+        &self,
+        begin: Version,
+        end: Version,
+        db_batch: &mut SchemaBatch,
+    ) -> anyhow::Result<()> {
+        db_batch.delete_range::<EventAccumulatorSchema>(
+            &(begin, Position::from_inorder_index(0)),
+            &(end, Position::from_inorder_index(0)),
+        )
+    }
+
+    /// Prunes events by version store for a set of events starting at start_version
+    pub fn prune_events_by_version(
+        &self,
+        events: Vec<Vec<ContractEvent>>,
+        start_version: Version,
+        db_batch: &mut SchemaBatch,
+    ) -> anyhow::Result<()> {
+        let mut current_version = start_version;
+        for events_by_version in events {
+            for event in events_by_version {
+                db_batch.delete::<EventByVersionSchema>(&(
+                    *event.key(),
+                    current_version,
+                    event.sequence_number(),
+                ))?;
+            }
+            current_version = current_version.checked_add(1).expect(
+                "Integer overflow when incrementing the current version in event store pruner",
+            );
+        }
+        Ok(())
+    }
+
+    /// Prunes the event schema for a range of version in [begin, end)
+    pub fn prune_event_schema(
+        &self,
+        begin: Version,
+        end: Version,
+        db_batch: &mut SchemaBatch,
+    ) -> anyhow::Result<()> {
+        db_batch.delete_range::<EventSchema>(&(begin, 0_u64), &(end, 0_u64))
     }
 }
 
